@@ -7,12 +7,18 @@ is a vertical column of 6 colored boxes (3 bids + 3 asks), with colors
 representing quantity levels on a rainbow spectrum from red (min) to blue (max).
 
 Usage:
-    python visualize_orderbook.py YYYY-MM-DD PRODUCT HH:MM:SS HH:MM:SS [--highlight-qty QTY QTY]
+    python visualize_orderbook.py YYYY-MM-DD PRODUCT HH:MM:SS HH:MM:SS [options]
 
 Example:
+    # Basic usage (no highlighting)
     python visualize_orderbook.py 2026-01-06 ADA 00:00:00 00:05:00
+    
+    # Manual highlight quantities
     python visualize_orderbook.py 2026-01-06 ADA 00:00:00 00:05:00 --highlight-qty 1600.0
     python visualize_orderbook.py 2026-01-06 ADA 00:00:00 00:05:00 --highlight-qty 70.9 1600.0
+    
+    # Auto-detect quantities from chain files
+    python visualize_orderbook.py 2026-01-06 ADA 00:00:00 00:05:00 --exchange-id 129 --market-id 293
 """
 
 import pandas as pd
@@ -37,6 +43,124 @@ def load_orderbook(file_path: Path) -> pd.DataFrame:
     df['datetime_ingest'] = pd.to_datetime(df['datetime_ingest'])
     
     return df
+
+
+def load_trades(file_path: Path, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+    """
+    Load trades data from CSV file and filter by time window.
+    
+    Args:
+        file_path: Path to trades CSV file
+        start_dt: Start datetime for filtering
+        end_dt: End datetime for filtering
+    
+    Returns:
+        DataFrame with trades in the time window, or empty DataFrame if file doesn't exist
+    """
+    if not file_path.exists():
+        print(f"  Warning: Trades file not found: {file_path}")
+        return pd.DataFrame()
+    
+    df = pd.read_csv(file_path)
+    
+    # Convert datetime column
+    df['datetime_exchange'] = pd.to_datetime(df['datetime_exchange'])
+    
+    # Filter to time window
+    mask = (df['datetime_exchange'] >= start_dt) & (df['datetime_exchange'] <= end_dt)
+    return df[mask].copy()
+
+
+def load_highlight_quantities_from_chains(results_dir: Path, date: str,
+                                          exchange_id: int, market_id: int) -> set:
+    """
+    Load unique initial_qty values from buy and sell chain CSV files.
+    
+    Args:
+        results_dir: Path to results directory containing chain files
+        date: Date string in YYYY-MM-DD format
+        exchange_id: Exchange ID used in chain filename
+        market_id: Market ID used in chain filename
+    
+    Returns:
+        Set of unique initial_qty values found across both chain files
+    """
+    quantities = set()
+    
+    for side in ['buy', 'sell']:
+        chain_file = results_dir / f"{date}_exchange-{exchange_id}_market-{market_id}_chains_{side}.csv"
+        if chain_file.exists():
+            df = pd.read_csv(chain_file)
+            if 'initial_qty' in df.columns:
+                side_qtys = df['initial_qty'].unique()
+                quantities.update(side_qtys)
+                print(f"  Loaded {len(side_qtys)} unique quantities from {side} chains")
+            else:
+                print(f"  Warning: 'initial_qty' column not found in {chain_file}")
+        else:
+            print(f"  Warning: Chain file not found: {chain_file}")
+    
+    return quantities
+
+
+def map_trades_to_indices(trades: pd.DataFrame, orderbook_timestamps: pd.Series) -> list:
+    """
+    Map each trade to the nearest orderbook snapshot index.
+    
+    For each trade, finds the closest orderbook snapshot timestamp and determines
+    which row to highlight based on trade side:
+    - Buy trade (side=1): buyer lifts the ask -> highlight Ask 1 (row index 2)
+    - Sell trade (side=2): seller hits the bid -> highlight Bid 1 (row index 3)
+    
+    Args:
+        trades: DataFrame with 'datetime_exchange' and 'side' columns
+        orderbook_timestamps: Series of orderbook snapshot timestamps
+    
+    Returns:
+        List of (snapshot_index, row_index) tuples for overlay rendering
+    """
+    if trades.empty:
+        return []
+    
+    # Convert timestamps to numpy arrays for efficient searching
+    ob_times = orderbook_timestamps.values.astype('datetime64[ns]')
+    trade_times = trades['datetime_exchange'].values.astype('datetime64[ns]')
+    
+    # Row indices for trade sides
+    # Row 2 = Ask 1 (best ask), Row 3 = Bid 1 (best bid)
+    SIDE_BUY = 1
+    ASK1_ROW = 2
+    BID1_ROW = 3
+    
+    overlay_positions = []
+    
+    for i, trade_time in enumerate(trade_times):
+        # Find insertion point (index where trade_time would be inserted to maintain sort)
+        idx = np.searchsorted(ob_times, trade_time)
+        
+        # Determine nearest snapshot index
+        if idx == 0:
+            # Trade is before or at first snapshot
+            snap_idx = 0
+        elif idx >= len(ob_times):
+            # Trade is after last snapshot
+            snap_idx = len(ob_times) - 1
+        else:
+            # Trade is between two snapshots - find nearest
+            time_before = ob_times[idx - 1]
+            time_after = ob_times[idx]
+            if (trade_time - time_before) <= (time_after - trade_time):
+                snap_idx = idx - 1
+            else:
+                snap_idx = idx
+        
+        # Determine row based on trade side
+        side = trades.iloc[i]['side']
+        row_idx = ASK1_ROW if side == SIDE_BUY else BID1_ROW
+        
+        overlay_positions.append((snap_idx, row_idx))
+    
+    return overlay_positions
 
 
 def filter_by_time(df: pd.DataFrame, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
@@ -72,13 +196,15 @@ def extract_quantities(df: pd.DataFrame) -> np.ndarray:
 def plot_heatmap(quantities: np.ndarray, timestamps: pd.Series,
                  prices: dict,
                  date: str, product: str, start_time: str, end_time: str,
-                 output_path: Path, highlight_qtys: list = None) -> None:
+                 output_path: Path, highlight_qtys: list = None,
+                 trades_overlay: list = None) -> None:
     """
     Plot dual-panel orderbook visualization: heatmap on top, best bid/ask prices on bottom.
     
     Top panel: Heatmap where each column is a time snapshot, each row is a price level.
     Colors represent quantity magnitude on a rainbow spectrum.
     If highlight_qtys is provided, cells matching those quantities are colored black.
+    If trades_overlay is provided, trade cells are colored white.
     
     Bottom panel: Line chart of best bid and best ask prices over time,
     with inverted Y-axis to match heatmap orientation (Ask below Bid).
@@ -93,6 +219,7 @@ def plot_heatmap(quantities: np.ndarray, timestamps: pd.Series,
         end_time: End time string for title
         output_path: Path to save the output image
         highlight_qtys: Optional list of quantities to highlight in black
+        trades_overlay: Optional list of (snapshot_index, row_index) tuples for trade markers
     """
     n_levels, n_snapshots = quantities.shape
     
@@ -128,7 +255,7 @@ def plot_heatmap(quantities: np.ndarray, timestamps: pd.Series,
         interpolation='nearest'
     )
     
-    # Overlay black boxes for highlighted quantities
+    # Overlay white boxes for highlighted quantities (my orders)
     if highlight_qtys is not None and len(highlight_qtys) > 0:
         # Build combined mask for all highlight quantities
         combined_mask = np.zeros_like(quantities, dtype=bool)
@@ -147,9 +274,30 @@ def plot_heatmap(quantities: np.ndarray, timestamps: pd.Series,
             # Create an overlay array with NaN for non-highlighted cells
             overlay = np.where(combined_mask, 1.0, np.nan)
             
-            # Plot overlay with black color
+            # Plot overlay with white color
             ax.imshow(
                 overlay,
+                aspect='auto',
+                cmap=mcolors.ListedColormap(['white']),
+                vmin=0,
+                vmax=1,
+                interpolation='nearest'
+            )
+    
+    # Overlay black markers for trades
+    if trades_overlay is not None and len(trades_overlay) > 0:
+        trade_mask = np.zeros_like(quantities, dtype=bool)
+        for snap_idx, row_idx in trades_overlay:
+            # Bounds check to avoid index errors
+            if 0 <= snap_idx < n_snapshots and 0 <= row_idx < n_levels:
+                trade_mask[row_idx, snap_idx] = True
+        
+        n_trades = np.sum(trade_mask)
+        if n_trades > 0:
+            # Create overlay with black markers
+            trade_overlay = np.where(trade_mask, 1.0, np.nan)
+            ax.imshow(
+                trade_overlay,
                 aspect='auto',
                 cmap=mcolors.ListedColormap(['black']),
                 vmin=0,
@@ -182,9 +330,10 @@ def plot_heatmap(quantities: np.ndarray, timestamps: pd.Series,
     ax.set_ylabel('Order Book Level')
     title = f'Orderbook Depth Heatmap: {date} | {product}-TL\n'
     title += f'Time Window: {start_time} - {end_time} | Snapshots: {n_snapshots:,}'
+    if trades_overlay is not None and len(trades_overlay) > 0:
+        title += f' | Trades: {len(trades_overlay)} (black)'
     if highlight_qtys is not None and len(highlight_qtys) > 0:
-        qty_strs = ', '.join(f'{q:,.2f}' for q in highlight_qtys)
-        title += f' | Highlight: {qty_strs} (black)'
+        title += f' | My Orders (white)'
     ax.set_title(title)
     
     # Add horizontal line between bids and asks
@@ -225,6 +374,9 @@ Examples:
     python visualize_orderbook.py 2026-01-06 ADA 12:00:00 13:30:00
     python visualize_orderbook.py 2026-01-06 ADA 00:00:00 00:05:00 --highlight-qty 1600.0
     python visualize_orderbook.py 2026-01-06 ADA 00:00:00 00:05:00 --highlight-qty 70.9 1600.0
+    python visualize_orderbook.py 2026-01-06 ADA 00:00:00 00:05:00 --exchange-id 129 --market-id 293
+    python visualize_orderbook.py 2026-01-06 ADA 12:45:00 12:50:00 --no-trades
+    python visualize_orderbook.py 2026-01-06 ADA 00:00:00 00:05:00 --no-highlight
         """
     )
     parser.add_argument('date', type=str, help='Date in YYYY-MM-DD format')
@@ -233,6 +385,14 @@ Examples:
     parser.add_argument('end', type=str, help='End time in HH:MM:SS format')
     parser.add_argument('--highlight-qty', type=float, nargs='+', default=None,
                         help='Quantity value(s) to highlight in black (can specify multiple)')
+    parser.add_argument('--exchange-id', type=int, default=None,
+                        help='Exchange ID for auto-loading highlight quantities from chain files')
+    parser.add_argument('--market-id', type=int, default=None,
+                        help='Market ID for auto-loading highlight quantities from chain files')
+    parser.add_argument('--no-highlight', action='store_true',
+                        help='Disable quantity highlighting entirely')
+    parser.add_argument('--no-trades', action='store_true',
+                        help='Disable trades overlay (trades are shown by default)')
     
     args = parser.parse_args()
     
@@ -266,6 +426,36 @@ Examples:
     
     # Input file: Public_YYYY-MM-DD_PRODUCT-TL_orderbook_consolidated.csv
     input_file = results_dir / f"Public_{args.date}_{args.product}-TL_orderbook_consolidated.csv"
+    # Trades file: Public_YYYY-MM-DD_PRODUCT-TL_trades.csv
+    trades_file = results_dir / f"Public_{args.date}_{args.product}-TL_trades.csv"
+    
+    # Determine highlight quantities
+    # Priority: 1) --no-highlight disables, 2) --highlight-qty explicit values, 3) auto-detect from chains
+    highlight_qtys = None
+    highlight_mode = "none"
+    
+    if args.no_highlight:
+        highlight_qtys = None
+        highlight_mode = "disabled"
+    elif args.highlight_qty is not None:
+        highlight_qtys = args.highlight_qty
+        highlight_mode = "explicit"
+    elif args.exchange_id is not None and args.market_id is not None:
+        # Auto-detect from chain files
+        print(f"\nAuto-detecting highlight quantities from chain files...")
+        highlight_set = load_highlight_quantities_from_chains(
+            results_dir, args.date, args.exchange_id, args.market_id
+        )
+        if highlight_set:
+            highlight_qtys = list(highlight_set)
+            highlight_mode = "auto"
+            print(f"  Total unique quantities: {len(highlight_qtys)}")
+        else:
+            print(f"  Warning: No quantities found in chain files")
+    elif args.exchange_id is not None or args.market_id is not None:
+        # Only one of exchange_id/market_id provided - warn user
+        print("Warning: Both --exchange-id and --market-id are required for auto-detection.")
+        print("         No highlighting will be applied.")
     
     print("=" * 60)
     print("Orderbook Depth Heatmap Visualization")
@@ -273,9 +463,19 @@ Examples:
     print(f"Date: {args.date}")
     print(f"Product: {args.product}")
     print(f"Time Window: {args.start} - {args.end}")
-    if args.highlight_qty is not None and len(args.highlight_qty) > 0:
-        print(f"Highlight Quantities: {args.highlight_qty}")
-    print(f"Input File: {input_file}")
+    print(f"Trades Overlay: {'Disabled' if args.no_trades else 'Enabled'}")
+    if highlight_mode == "disabled":
+        print(f"Highlighting: Disabled")
+    elif highlight_mode == "explicit":
+        print(f"Highlight Quantities (explicit): {highlight_qtys}")
+    elif highlight_mode == "auto":
+        print(f"Highlight Quantities (auto from chains): {len(highlight_qtys)} values")
+        print(f"  Exchange ID: {args.exchange_id}, Market ID: {args.market_id}")
+    else:
+        print(f"Highlighting: None (use --highlight-qty or --exchange-id/--market-id)")
+    print(f"Orderbook File: {input_file}")
+    if not args.no_trades:
+        print(f"Trades File: {trades_file}")
     print("=" * 60)
     
     # Load data
@@ -307,6 +507,24 @@ Examples:
     print(f"  Best bid price range: {prices['best_bid_price_1'].min():.4f} - {prices['best_bid_price_1'].max():.4f}")
     print(f"  Best ask price range: {prices['best_ask_price_1'].min():.4f} - {prices['best_ask_price_1'].max():.4f}")
     
+    # Load and process trades (if enabled)
+    trades_overlay = None
+    if not args.no_trades:
+        print(f"\nLoading trades data...")
+        trades_df = load_trades(trades_file, start_dt, end_dt)
+        if not trades_df.empty:
+            print(f"  Trades in window: {len(trades_df):,}")
+            # Count by side
+            buy_count = (trades_df['side'] == 1).sum()
+            sell_count = (trades_df['side'] == 2).sum()
+            print(f"    Buy trades: {buy_count:,} (will mark Ask 1 white)")
+            print(f"    Sell trades: {sell_count:,} (will mark Bid 1 white)")
+            
+            # Map trades to snapshot indices
+            trades_overlay = map_trades_to_indices(trades_df, df_filtered['datetime_ingest'])
+        else:
+            print(f"  No trades found in time window")
+    
     # Generate output filename
     start_safe = args.start.replace(':', '-')
     end_safe = args.end.replace(':', '-')
@@ -323,7 +541,8 @@ Examples:
         args.start,
         args.end,
         output_file,
-        highlight_qtys=args.highlight_qty
+        highlight_qtys=highlight_qtys,
+        trades_overlay=trades_overlay
     )
     
     print("\n" + "=" * 60)

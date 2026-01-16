@@ -7,12 +7,16 @@ A comprehensive toolkit for analyzing Order Management System (OMS) order log da
 - [Quick Start](#quick-start)
 - [Requirements](#requirements)
 - [Project Structure](#project-structure)
+- [Data Quality: Paribu Trade Deduplication](#data-quality-paribu-trade-deduplication)
 - [Tools Overview](#tools-overview)
   - [analyze_oms.py](#analyze_omspy---main-analysis-tool)
   - [extract_chains.py](#extract_chainspy---order-chain-extraction)
   - [extract_public_data.py](#extract_public_datapy---public-market-data-extraction)
   - [visualize_orderbook.py](#visualize_orderbookpy---orderbook-heatmap-visualization)
   - [visualize_chains.py](#visualize_chainspy---order-chain-visualization)
+  - [visualize_timestamps.py](#visualize_timestampspy---timestamp-analysis-visualization)
+  - [find_co_markets.py](#find_co_marketspy---co-traded-market-finder)
+  - [create_markets_map.py](#create_markets_mappy---market-mapping-generator)
   - [view_parq.py](#view_parqpy---parquet-file-viewer)
 - [Input Data Format](#input-data-format)
 - [Output Files](#output-files)
@@ -39,6 +43,15 @@ python visualize_orderbook.py 2026-01-06 ADA 12:00:00 12:05:00
 
 # Visualize order chains as time vs price plot
 python visualize_chains.py 2026-01-06 115 134 00:00:00 01:00:00
+
+# Visualize timestamp discrepancies (ingest vs exchange time)
+python visualize_timestamps.py --date 2026-01-06 --product ADA-TL
+
+# Create cross-exchange market mapping
+python create_markets_map.py
+
+# Find co-traded markets across BTCTURK and PARIBU
+python find_co_markets.py 2026-01-06
 
 # View a parquet file as CSV
 python view_parq.py /path/to/file.parq
@@ -68,20 +81,24 @@ pip install pandas pyarrow numpy matplotlib
 .
 ├── analyze_oms.py          # Main OMS order log analysis tool
 ├── extract_chains.py       # Order chain extraction with histograms
-├── extract_public_data.py  # Public market data extraction (orderbook/trades)
+├── extract_public_data.py  # Public market data extraction (orderbook/trades) with deduplication
 ├── visualize_orderbook.py  # Orderbook depth heatmap + price visualization
 ├── visualize_chains.py     # Order chain time vs price visualization
+├── visualize_timestamps.py # Timestamp analysis visualization (ingest vs exchange time)
 ├── view_parq.py            # Parquet file viewer/converter
 ├── find_co_markets.py      # Find co-traded markets across exchanges
 ├── create_markets_map.py   # Create market reference mapping
 ├── market.csv              # Reference file mapping market/exchange IDs to names
+├── PARIBU_DEDUPLICATION_BRIEFING.md  # Technical documentation on trade deduplication
 ├── README.md               # This documentation
 └── results/                # Output directory (created automatically)
+    ├── markets_map.csv                         # Cross-exchange market ID mapping
     ├── YYYY-MM-DD__oms_order_log_analysis.md   # Analysis reports
     ├── YYYY-MM-DD_order_timing_stats.csv       # Cancellation timing stats
     ├── YYYY-MM-DD_trade_statistics.csv         # Trade volume stats
     ├── YYYY-MM-DD_notional_value_stats.csv     # Notional value stats
     ├── YYYY-MM-DD_oms_order_log.csv            # Converted order log data
+    ├── YYYY-MM-DD_co-markets.csv               # Co-traded markets with overlap flags
     ├── YYYY-MM-DD_exchange-X_market-Y_chains_buy.csv   # Buy order chains
     ├── YYYY-MM-DD_exchange-X_market-Y_chains_sell.csv  # Sell order chains
     ├── Public_YYYY-MM-DD_PRODUCT_orderbook.csv         # Public orderbook data
@@ -90,9 +107,56 @@ pip install pandas pyarrow numpy matplotlib
     └── charts/                                 # Generated visualizations
         ├── *_orderbook_heatmap_*.png           # Orderbook depth heatmaps with price charts
         ├── *_chains_visual_*.png               # Order chain time vs price plots
+        ├── *_timestamp_scatter.png             # Timestamp comparison scatter plots
+        ├── *_timestamp_delay_hist.png          # Ingestion delay histograms
+        ├── *_timestamp_delay_timeseries.png    # Delay time series plots
         ├── *_duration_hist.png                 # Chain duration histograms
         └── *_empty_gap_hist.png                # Empty gap histograms
 ```
+
+---
+
+## Data Quality: Paribu Trade Deduplication
+
+### The Problem
+
+The Paribu cryptocurrency exchange emits trade data in periodic packets. **Critical Issue**: The exchange retransmits the same trades multiple times across different packets. This is a known behavior of their system, not a data capture error.
+
+When aggregating multiple Parquet files without deduplication:
+- **Duplicate trades inflate volume and trade counts** - the same trade is counted multiple times
+- **Analytics become skewed** - aggregations, OHLCV calculations, and statistics are incorrect
+- **Typical duplication rate**: 85-95% of raw records are duplicates
+
+### Key Characteristics of Duplicates
+
+- The same `trade_id` (UUID) appears in multiple packets/files
+- All trade data fields remain **identical** across retransmissions:
+  - `trade_id`, `ts_exchange_unix_ms`, `price_e8`, `size_e8`, `side`
+- **Only difference**: `ts_ingest_unix_us` (packet capture timestamp) differs between retransmissions
+
+### The Solution
+
+The `extract_public_data.py` script automatically handles deduplication:
+
+1. **Deduplication by `trade_id`**: After loading all Parquet files, duplicates are removed keeping the first occurrence
+2. **Date filtering by exchange timestamp**: Trades are filtered to only include those with `ts_exchange_unix_ms` on the target date (not ingest date)
+3. **Authoritative timestamp**: Output is sorted by `ts_exchange_unix_ms` (the actual trade time), not ingest time
+4. **Clean output**: Ingest timestamp columns are dropped from trade output (irrelevant after deduplication)
+
+### Example Results
+
+```
+Raw records:     11,100
+After dedup:        995  (91% were duplicates!)
+After date filter:  976  (19 from adjacent dates removed)
+```
+
+### Important Notes
+
+- **Always use `ts_exchange_unix_ms`** for time-based operations on trade data
+- **Ignore ingest timestamps** for trades - they only reflect packet capture time
+- **Apply deduplication before any aggregation** to ensure accurate metrics
+- For detailed technical documentation, see `PARIBU_DEDUPLICATION_BRIEFING.md`
 
 ---
 
@@ -189,6 +253,8 @@ python extract_chains.py 2026-01-06 129 263    # PARIBU SPOT.FLOKI.TL
 
 Extracts public market data (orderbook and trades) from Paribu hourly parquet files. Aggregates all hours for a given date and outputs to CSV files.
 
+**Important**: For trade data, this script automatically handles deduplication and date filtering. See [Data Quality: Paribu Trade Deduplication](#data-quality-paribu-trade-deduplication) for details.
+
 #### Data Source
 
 Public market data is located at:
@@ -215,7 +281,7 @@ The data is organized by product, then by data type (orderbook/trades), then by 
 # Extract both orderbook and trades for a product on a date
 python extract_public_data.py --date 2026-01-06 --product ADA-TL
 
-# Extract only trades
+# Extract only trades (with automatic deduplication)
 python extract_public_data.py --date 2026-01-06 --product ADA-TL --type trades
 
 # Extract only orderbook
@@ -235,6 +301,8 @@ python extract_public_data.py --date 2026-01-06 --product ADA-TL --type orderboo
 - **Hourly Aggregation**: Reads and concatenates all parquet files from hours 00-23
 - **Multiple Files Per Hour**: Handles cases where trades have multiple files per hour
 - **Schema Compatibility**: Supports both older (`ts_ingest_unix_ms`) and newer (`ts_ingest_unix_us`) schemas
+- **Trade Deduplication**: Automatically removes duplicate trades by `trade_id` (see [Data Quality](#data-quality-paribu-trade-deduplication))
+- **Date Filtering**: Filters trades to only include those with exchange timestamps on the target date
 - **Data Transformation**:
   - Converts timestamps to human-readable datetime
   - Converts `price_e8` and `size_e8` to decimal values (divides by 1e8)
@@ -246,7 +314,8 @@ python extract_public_data.py --date 2026-01-06 --product ADA-TL --type orderboo
 
 1. **Raw Orderbook** (`Public_YYYY-MM-DD_PRODUCT_orderbook.csv`):
    - All orderbook entries with full detail
-   - Columns: datetime_exchange, datetime_ingest, exchange, symbol_canonical, symbol_native, side, side_name, price, size, price_e8, size_e8, ts_exchange_unix_ms, ts_ingest_unix_us, seq_exchange, snapshot_id, meta_json
+   - Sorted by ingest timestamp (sequence ordering)
+   - Columns: datetime_ingest, ts_ingest_unix_us, exchange, symbol_canonical, symbol_native, side, side_name, price, size, price_e8, size_e8, seq_exchange, snapshot_id, meta_json, datetime_exchange, ts_exchange_unix_ms
 
 2. **Consolidated Orderbook** (`Public_YYYY-MM-DD_PRODUCT_orderbook_consolidated.csv`):
    - One row per orderbook snapshot showing top 3 bid/ask levels
@@ -255,8 +324,11 @@ python extract_public_data.py --date 2026-01-06 --product ADA-TL --type orderboo
    - Asks sorted by price ascending (lowest = best_ask_price_1)
 
 3. **Trades** (`Public_YYYY-MM-DD_PRODUCT_trades.csv`):
-   - All trade records
-   - Columns: datetime_exchange, datetime_ingest, exchange, symbol_canonical, symbol_native, trade_id, side, side_name, price, size, price_e8, size_e8, ts_exchange_unix_ms, ts_ingest_unix_us, meta_json
+   - Deduplicated trade records (unique by `trade_id`)
+   - Filtered to target date by exchange timestamp
+   - Sorted by exchange timestamp (authoritative trade time)
+   - Columns: ts_exchange_unix_ms, datetime_exchange, exchange, symbol_canonical, symbol_native, trade_id, side, side_name, price, size, price_e8, size_e8, meta_json
+   - **Note**: Ingest timestamps are not included (irrelevant after deduplication)
 
 #### Available Products
 
@@ -392,6 +464,145 @@ python visualize_chains.py 2026-01-06 115 188 12:00:00 13:30:00
 Requires chain data generated by `extract_chains.py`:
 - `results/YYYY-MM-DD_exchange-X_market-Y_chains_buy.csv`
 - `results/YYYY-MM-DD_exchange-X_market-Y_chains_sell.csv`
+
+---
+
+### `visualize_timestamps.py` - Timestamp Analysis Visualization
+
+Visualizes the relationship between ingest timestamps and exchange timestamps for public trade data. Helps identify discrepancies and patterns in data ingestion timing.
+
+#### Usage
+
+```bash
+python visualize_timestamps.py --date YYYY-MM-DD --product SYMBOL
+```
+
+#### Examples
+
+```bash
+python visualize_timestamps.py --date 2026-01-06 --product ADA-TL
+python visualize_timestamps.py --date 2026-01-07 --product BTC-TL
+```
+
+#### Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--date` | Yes | Date in YYYY-MM-DD format |
+| `--product` | Yes | Product symbol (e.g., ADA-TL, BTC-TL) |
+
+#### Features
+
+- **Scatter Plot**: Exchange timestamp vs ingest timestamp with delay coloring (perfect match = 45° line)
+- **Delay Histogram**: Distribution of ingestion delays with full and zoomed (≤5 min) views
+- **Time Series Plot**: Delay over time with rolling average, sorted by both exchange and ingest timestamps
+- **Statistics Summary**: Comprehensive delay statistics including percentile distribution
+- **Warning Detection**: Flags negative delays (exchange timestamp after ingest - should not happen)
+
+#### Generated Outputs
+
+1. **Scatter Plot** (`*_timestamp_scatter.png`):
+   - X-axis: Exchange timestamp
+   - Y-axis: Ingest timestamp
+   - Color: Delay in seconds (red = high, green = low)
+   - Reference line: Perfect match (y=x)
+
+2. **Delay Histogram** (`*_timestamp_delay_hist.png`):
+   - Left panel: Full distribution
+   - Right panel: Zoomed to delays ≤ 5 minutes
+   - Mean and median reference lines
+
+3. **Time Series** (`*_timestamp_delay_timeseries.png`):
+   - Top panel: Delay over time (by exchange timestamp)
+   - Bottom panel: Delay over time (by ingest timestamp)
+   - Rolling average overlay
+   - Reference lines at 1 min and 5 min
+
+#### Prerequisites
+
+Requires trade data generated by `extract_public_data.py`:
+- `results/Public_YYYY-MM-DD_PRODUCT_trades.csv`
+
+**Note**: This tool requires the trade CSV to include `ts_ingest_unix_us` column, which is only present when running `extract_public_data.py` in a mode that preserves ingest timestamps.
+
+---
+
+### `find_co_markets.py` - Co-Traded Market Finder
+
+Finds base currencies traded on both BTCTURK and PARIBU exchanges for a given date. Lists all traded markets with an overlap flag indicating if traded on both exchanges.
+
+#### Usage
+
+```bash
+python find_co_markets.py YYYY-MM-DD
+```
+
+#### Examples
+
+```bash
+python find_co_markets.py 2026-01-06
+```
+
+#### Features
+
+- **Cross-Exchange Analysis**: Identifies which base currencies are traded on both BTCTURK and PARIBU
+- **Overlap Detection**: Flags markets with `overlap=1` if traded on both exchanges
+- **Market ID Mapping**: Uses `markets_map.csv` to translate market IDs to base currencies
+- **Summary Output**: Prints console summary and writes detailed CSV
+
+#### Generated Outputs
+
+- `results/YYYY-MM-DD_co-markets.csv`:
+
+| Column | Description |
+|--------|-------------|
+| `base_currency` | The base currency symbol (e.g., BTC, ETH, ADA) |
+| `btcturk_exchange_id` | BTCTURK exchange ID (115) |
+| `btcturk_market_id` | BTCTURK market ID for this base currency |
+| `paribu_exchange_id` | PARIBU exchange ID (129) |
+| `paribu_market_id` | PARIBU market ID for this base currency |
+| `overlap` | 1 if traded on both exchanges, 0 otherwise |
+
+#### Prerequisites
+
+Requires:
+- `results/markets_map.csv` (generated by `create_markets_map.py`)
+- OMS parquet file for the target date at the configured data path
+
+---
+
+### `create_markets_map.py` - Market Mapping Generator
+
+Creates a mapping between BTCTURK and PARIBU market IDs based on shared base currencies. This mapping is used by other tools to correlate markets across exchanges.
+
+#### Usage
+
+```bash
+python create_markets_map.py
+```
+
+#### Features
+
+- **Symbol Parsing**: Extracts base currency from symbols like `SPOT.BTC.TRY` → `BTC`
+- **Cross-Exchange Matching**: Finds base currencies available on both exchanges
+- **First-Occurrence Preference**: Uses the first market ID for each base currency per exchange
+
+#### Generated Outputs
+
+- `results/markets_map.csv`:
+
+| Column | Description |
+|--------|-------------|
+| `base_currency` | The base currency symbol (e.g., BTC, ETH, ADA) |
+| `btcturk_exchange_id` | BTCTURK exchange ID (115) |
+| `btcturk_market_id` | BTCTURK market ID for this base currency |
+| `paribu_exchange_id` | PARIBU exchange ID (129) |
+| `paribu_market_id` | PARIBU market ID for this base currency |
+
+#### Prerequisites
+
+Requires:
+- `market.csv` in the project root directory
 
 ---
 
@@ -566,15 +777,20 @@ done
 
 ```bash
 # Extract orderbook and trades for ADA-TL on a specific date
+# Trades are automatically deduplicated and filtered to target date
 python extract_public_data.py --date 2026-01-06 --product ADA-TL
 
-# Extract only trades for multiple products
+# Extract only trades for multiple products (with deduplication)
 for product in ADA-TL BTC-TL ETH-TL XRP-TL; do
     python extract_public_data.py --date 2026-01-06 --product $product --type trades
 done
 
 # Extract orderbook data (includes consolidated top-of-book)
 python extract_public_data.py --date 2026-01-06 --product BTC-TL --type orderbook
+
+# Example output showing deduplication:
+#   Deduplicated: 11,100 -> 995 trades (10,105 duplicates removed)
+#   Date filtered: 995 -> 976 trades (19 from other dates removed)
 ```
 
 ### Orderbook Visualization
@@ -613,6 +829,37 @@ for market_id in 134 188 244; do
 done
 ```
 
+### Cross-Exchange Market Analysis
+
+```bash
+# Step 1: Generate the cross-exchange market mapping (one-time setup)
+python create_markets_map.py
+
+# Step 2: Find co-traded markets for a specific date
+python find_co_markets.py 2026-01-06
+
+# Step 3: Extract chains for co-traded markets on both exchanges
+# Example: ADA is traded on both BTCTURK (market_id from markets_map) and PARIBU
+python extract_chains.py 2026-01-06 115 244    # BTCTURK ADA
+python extract_chains.py 2026-01-06 129 293    # PARIBU ADA
+```
+
+### Timestamp Analysis
+
+```bash
+# First, extract trade data with ingest timestamps preserved
+python extract_public_data.py --date 2026-01-06 --product ADA-TL --type trades
+
+# Visualize timestamp discrepancies
+python visualize_timestamps.py --date 2026-01-06 --product ADA-TL
+
+# Analyze multiple products
+for product in ADA-TL BTC-TL ETH-TL; do
+    python extract_public_data.py --date 2026-01-06 --product $product --type trades
+    python visualize_timestamps.py --date 2026-01-06 --product $product
+done
+```
+
 ---
 
 ## Key Metrics Interpretation
@@ -644,3 +891,6 @@ A low execution rate (e.g., <1%) typically indicates:
 - Notional values are calculated in TRY (Turkish Lira)
 - The `results/` directory is created automatically if it doesn't exist
 - Date prefixes in output filenames are extracted from input filenames or default to the current date
+- **Paribu Trade Data**: Raw trade data contains 85-95% duplicates due to exchange retransmission behavior. The `extract_public_data.py` script handles this automatically. See [Data Quality](#data-quality-paribu-trade-deduplication) for details.
+- **Trade Timestamps**: For trade analysis, always use `ts_exchange_unix_ms` (authoritative trade time), not ingest timestamps
+- For detailed technical documentation on the deduplication process, see `PARIBU_DEDUPLICATION_BRIEFING.md`

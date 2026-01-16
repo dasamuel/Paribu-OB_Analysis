@@ -124,6 +124,16 @@ def read_hourly_data(data_type_path: Path, date_folder: str) -> tuple[pd.DataFra
     # Concatenate all dataframes
     combined_df = pd.concat(all_dfs, ignore_index=True)
     
+    # Deduplicate trades by trade_id (Paribu retransmits same trades in multiple packets)
+    # This is a known behavior of the Paribu exchange - same trade appears in multiple files
+    # with different ingest timestamps but identical trade data
+    if 'trade_id' in combined_df.columns:
+        before_count = len(combined_df)
+        combined_df = combined_df.drop_duplicates(subset=['trade_id'], keep='first')
+        after_count = len(combined_df)
+        if before_count != after_count:
+            print(f"  Deduplicated: {before_count:,} -> {after_count:,} trades ({before_count - after_count:,} duplicates removed)")
+    
     return combined_df, hours_with_data, hours_without_data
 
 
@@ -132,10 +142,12 @@ def transform_data(df: pd.DataFrame, data_type: str) -> pd.DataFrame:
     Transform the data:
     - Convert timestamps to human-readable datetime
     - Convert price_e8 and size_e8 to decimal values
-    - Sort by ingest timestamp (ts_ingest_unix_us) as primary key for sequence ordering
+    - For orderbook: sort by ingest timestamp (sequence ordering)
+    - For trades: sort by exchange timestamp (authoritative trade time after deduplication)
     
-    Note: datetime_exchange and ts_exchange_unix_ms may be incorrect/corrupted and are
-    included at the end of each row for later analysis.
+    Note: For orderbook data, ingest timestamps are used for sequence ordering.
+    For trades, after deduplication, we use exchange timestamps as the authoritative
+    trade time and drop ingest columns (they become irrelevant after dedup).
     """
     if df.empty:
         return df
@@ -143,16 +155,13 @@ def transform_data(df: pd.DataFrame, data_type: str) -> pd.DataFrame:
     # Determine which ingest timestamp column is present
     ingest_ts_col = "ts_ingest_unix_ms" if "ts_ingest_unix_ms" in df.columns else "ts_ingest_unix_us"
     
-    # Sort by ingest timestamp (primary key for sequence ordering)
-    df = df.sort_values(ingest_ts_col).reset_index(drop=True)
-    
     # Handle both ts_ingest_unix_ms (older) and ts_ingest_unix_us (newer) schemas
     if "ts_ingest_unix_ms" in df.columns:
         df["datetime_ingest"] = pd.to_datetime(df["ts_ingest_unix_ms"], unit="ms")
     elif "ts_ingest_unix_us" in df.columns:
         df["datetime_ingest"] = pd.to_datetime(df["ts_ingest_unix_us"], unit="us")
     
-    # Convert exchange timestamp to datetime (potentially corrupted, kept for analysis)
+    # Convert exchange timestamp to datetime
     df["datetime_exchange"] = pd.to_datetime(df["ts_exchange_unix_ms"], unit="ms")
     
     # Convert price and size from e8 format to decimal
@@ -164,10 +173,10 @@ def transform_data(df: pd.DataFrame, data_type: str) -> pd.DataFrame:
     side_map = {1: "buy", 2: "sell"}
     df["side_name"] = df["side"].map(side_map).fillna("unknown")
     
-    # Reorder columns for better readability
-    # datetime_ingest and ts_ingest_unix_us are the primary key fields (first)
-    # datetime_exchange and ts_exchange_unix_ms are potentially corrupted (at end)
+    # Reorder columns and sort based on data type
     if data_type == "orderbook":
+        # For orderbook: sort by ingest timestamp (sequence ordering)
+        df = df.sort_values(ingest_ts_col).reset_index(drop=True)
         cols_order = [
             "datetime_ingest", ingest_ts_col,
             "exchange", "symbol_canonical", "symbol_native",
@@ -177,13 +186,14 @@ def transform_data(df: pd.DataFrame, data_type: str) -> pd.DataFrame:
             "datetime_exchange", "ts_exchange_unix_ms"
         ]
     else:  # trades
+        # For trades: sort by exchange timestamp (authoritative trade time)
+        # After deduplication, ingest timestamps are irrelevant - drop them
+        df = df.sort_values("ts_exchange_unix_ms").reset_index(drop=True)
         cols_order = [
-            "datetime_ingest", ingest_ts_col,
+            "ts_exchange_unix_ms", "datetime_exchange",
             "exchange", "symbol_canonical", "symbol_native",
             "trade_id", "side", "side_name", "price", "size",
-            "price_e8", "size_e8",
-            "meta_json",
-            "datetime_exchange", "ts_exchange_unix_ms"
+            "price_e8", "size_e8", "meta_json"
         ]
     
     # Only include columns that exist
@@ -296,6 +306,18 @@ def extract_data(product: str, date_str: str, date_folder: str, data_type: str) 
     # Transform the data
     df = transform_data(df, data_type)
     
+    # For trades: filter by exchange date to ensure only target-date trades are included
+    # This is important because Paribu packets can contain trades from adjacent dates
+    if data_type == "trades" and not df.empty:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        df['exchange_date'] = df['datetime_exchange'].dt.date
+        before_filter = len(df)
+        df = df[df['exchange_date'] == target_date]
+        df = df.drop(columns=['exchange_date'])
+        after_filter = len(df)
+        if before_filter != after_filter:
+            print(f"  Date filtered: {before_filter:,} -> {after_filter:,} trades ({before_filter - after_filter:,} from other dates removed)")
+    
     # Generate output filename
     output_file = RESULTS_PATH / f"Public_{date_str}_{product}_{data_type}.csv"
     
@@ -306,7 +328,12 @@ def extract_data(product: str, date_str: str, date_folder: str, data_type: str) 
     # Print summary statistics
     if not df.empty:
         print(f"\n  Summary for {data_type}:")
-        print(f"    Time range (ingest): {df['datetime_ingest'].min()} to {df['datetime_ingest'].max()}")
+        if data_type == "trades":
+            # For trades: use exchange timestamp (authoritative after deduplication)
+            print(f"    Time range (exchange): {df['datetime_exchange'].min()} to {df['datetime_exchange'].max()}")
+        else:
+            # For orderbook: use ingest timestamp
+            print(f"    Time range (ingest): {df['datetime_ingest'].min()} to {df['datetime_ingest'].max()}")
         print(f"    Price range: {df['price'].min():.8f} to {df['price'].max():.8f}")
         print(f"    Total size: {df['size'].sum():,.2f}")
         
