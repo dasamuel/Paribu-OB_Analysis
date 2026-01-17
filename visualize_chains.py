@@ -20,6 +20,57 @@ import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 
+from results_path import get_results_dir, get_charts_dir, get_shared_dir
+
+
+def load_markets_map() -> pd.DataFrame:
+    """Load the markets map CSV from the shared directory."""
+    # Try shared directory first (new location)
+    shared_dir = get_shared_dir()
+    markets_file = shared_dir / "markets_map.csv"
+    
+    # Fall back to old location if not in shared
+    if not markets_file.exists():
+        markets_file = Path(__file__).parent / "results" / "markets_map.csv"
+    
+    if not markets_file.exists():
+        return pd.DataFrame()
+    
+    return pd.read_csv(markets_file)
+
+
+def get_market_symbol(exchange_id: int, market_id: int) -> str:
+    """
+    Get the market symbol (e.g., 'ADA-TL') from exchange_id and market_id.
+    
+    Returns the symbol if found, otherwise returns a fallback string.
+    """
+    markets_df = load_markets_map()
+    
+    if markets_df.empty:
+        return f"exchange-{exchange_id}_market-{market_id}"
+    
+    # Check Paribu columns
+    match = markets_df[
+        (markets_df['paribu_exchange_id'] == exchange_id) & 
+        (markets_df['paribu_market_id'] == market_id)
+    ]
+    
+    if not match.empty:
+        return f"{match.iloc[0]['base_currency']}-TL"
+    
+    # Check BTCTurk columns
+    match = markets_df[
+        (markets_df['btcturk_exchange_id'] == exchange_id) & 
+        (markets_df['btcturk_market_id'] == market_id)
+    ]
+    
+    if not match.empty:
+        return f"{match.iloc[0]['base_currency']}-TL"
+    
+    # Fallback
+    return f"exchange-{exchange_id}_market-{market_id}"
+
 
 def load_chains(file_path: Path) -> pd.DataFrame:
     """Load chain data from CSV file."""
@@ -172,13 +223,24 @@ Examples:
         print("Error: End time must be after start time.")
         sys.exit(1)
     
-    # Construct file paths
-    results_dir = Path.cwd() / "results"
-    charts_dir = results_dir / "charts"
-    charts_dir.mkdir(parents=True, exist_ok=True)
+    # Look up market symbol from exchange_id and market_id
+    market_symbol = get_market_symbol(args.exchange_id, args.market_id)
     
-    buy_file = results_dir / f"{args.date}_exchange-{args.exchange_id}_market-{args.market_id}_chains_buy.csv"
-    sell_file = results_dir / f"{args.date}_exchange-{args.exchange_id}_market-{args.market_id}_chains_sell.csv"
+    # Get directories using new folder structure
+    results_dir = get_results_dir(args.date, market_symbol)
+    charts_dir = get_charts_dir(args.date, market_symbol)
+    
+    # Chain files (try new filenames first, fall back to old)
+    buy_file = results_dir / "chains_buy.csv"
+    sell_file = results_dir / "chains_sell.csv"
+    
+    # Fall back to old location if new files don't exist
+    if not buy_file.exists():
+        old_results_dir = Path.cwd() / "results"
+        buy_file = old_results_dir / f"{args.date}_exchange-{args.exchange_id}_market-{args.market_id}_chains_buy.csv"
+    if not sell_file.exists():
+        old_results_dir = Path.cwd() / "results"
+        sell_file = old_results_dir / f"{args.date}_exchange-{args.exchange_id}_market-{args.market_id}_chains_sell.csv"
     
     print("=" * 60)
     print("Order Chain Visualization")
@@ -186,6 +248,7 @@ Examples:
     print(f"Date: {args.date}")
     print(f"Exchange ID: {args.exchange_id}")
     print(f"Market ID: {args.market_id}")
+    print(f"Market Symbol: {market_symbol}")
     print(f"Time Window: {args.start} - {args.end}")
     print("=" * 60)
     
@@ -214,10 +277,10 @@ Examples:
         print("\nWarning: No chains found in the specified time window.")
         sys.exit(0)
     
-    # Generate output filename (replace colons with dashes for filesystem compatibility)
+    # Generate output filename (simplified - directory already contains date/market info)
     start_safe = args.start.replace(':', '-')
     end_safe = args.end.replace(':', '-')
-    output_file = charts_dir / f"{args.date}_exchange-{args.exchange_id}_market-{args.market_id}_chains_visual_{start_safe}_{end_safe}.png"
+    output_file = charts_dir / f"chains_visual_{start_safe}_{end_safe}.png"
     
     # Plot
     print(f"\nGenerating visualization...")

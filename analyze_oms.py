@@ -19,6 +19,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Tuple, Optional
 
+from results_path import get_results_dir
+
 # =============================================================================
 # Data Loading & Cleaning
 # =============================================================================
@@ -685,10 +687,6 @@ Examples:
         print(f"Error: Input file not found: {input_file}")
         sys.exit(1)
     
-    # Determine output directory (current working directory / results)
-    output_dir = Path.cwd() / "results"
-    output_dir.mkdir(exist_ok=True)
-    
     # Extract date from input filename if possible (e.g., 2026-01-07__oms_order_log)
     input_stem = input_file.stem
     date_prefix = ""
@@ -698,12 +696,15 @@ Examples:
         # Fallback to today's date
         date_prefix = datetime.now().strftime("%Y-%m-%d")
     
-    # Output filenames with date prefix
-    report_file = output_dir / f"{input_stem}_analysis.md"
-    timing_csv = output_dir / f"{date_prefix}_order_timing_stats.csv"
-    trade_csv = output_dir / f"{date_prefix}_trade_statistics.csv"
-    notional_csv = output_dir / f"{date_prefix}_notional_value_stats.csv"
-    data_csv = output_dir / f"{date_prefix}_oms_order_log.csv"
+    # Get output directory using new folder structure (date-level only, no market)
+    output_dir = get_results_dir(date_prefix)
+    
+    # Output filenames (simplified - directory already contains date info)
+    report_file = output_dir / "oms_order_log_analysis.md"
+    timing_csv = output_dir / "order_timing_stats.csv"
+    trade_csv = output_dir / "trade_statistics.csv"
+    notional_csv = output_dir / "notional_value_stats.csv"
+    data_csv = output_dir / "oms_order_log.csv"
     
     # Get script directory for market.csv
     script_dir = Path(__file__).parent.resolve()

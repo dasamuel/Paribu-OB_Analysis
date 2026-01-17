@@ -10,10 +10,11 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+from results_path import get_results_dir
+
 
 # Base path for public market data
 DATA_BASE_PATH = Path("/Users/dasamuel/Data/MarketData/ParibuData/market-data")
-RESULTS_PATH = Path("/Users/dasamuel/Projects/Sandbox/results")
 
 
 def parse_args():
@@ -318,8 +319,11 @@ def extract_data(product: str, date_str: str, date_folder: str, data_type: str) 
         if before_filter != after_filter:
             print(f"  Date filtered: {before_filter:,} -> {after_filter:,} trades ({before_filter - after_filter:,} from other dates removed)")
     
-    # Generate output filename
-    output_file = RESULTS_PATH / f"Public_{date_str}_{product}_{data_type}.csv"
+    # Get output directory using new folder structure
+    results_dir = get_results_dir(date_str, product)
+    
+    # Generate output filename (simplified - no date/product prefix needed)
+    output_file = results_dir / f"{data_type}.csv"
     
     # Save to CSV
     df.to_csv(output_file, index=False)
@@ -348,8 +352,8 @@ def extract_data(product: str, date_str: str, date_folder: str, data_type: str) 
             consolidated_df = consolidate_orderbook(df)
             
             if not consolidated_df.empty:
-                # Generate consolidated output filename
-                consolidated_file = RESULTS_PATH / f"Public_{date_str}_{product}_{data_type}_consolidated.csv"
+                # Generate consolidated output filename (in same directory)
+                consolidated_file = results_dir / f"{data_type}_consolidated.csv"
                 consolidated_df.to_csv(consolidated_file, index=False)
                 print(f"  Saved {len(consolidated_df):,} consolidated snapshots to: {consolidated_file}")
                 
@@ -375,8 +379,7 @@ def main():
     # Validate and convert date
     date_folder = validate_date(args.date)
     
-    # Ensure results directory exists
-    RESULTS_PATH.mkdir(parents=True, exist_ok=True)
+    # Results directory is created automatically by get_results_dir()
     
     print(f"Extracting public market data:")
     print(f"  Product: {args.product}")

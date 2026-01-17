@@ -20,6 +20,61 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
+from results_path import get_results_dir, get_charts_dir, get_shared_dir
+
+
+# =============================================================================
+# Market Symbol Lookup
+# =============================================================================
+
+def load_markets_map() -> pd.DataFrame:
+    """Load the markets map CSV from the shared directory."""
+    # Try shared directory first (new location)
+    shared_dir = get_shared_dir()
+    markets_file = shared_dir / "markets_map.csv"
+    
+    # Fall back to old location if not in shared
+    if not markets_file.exists():
+        markets_file = Path(__file__).parent / "results" / "markets_map.csv"
+    
+    if not markets_file.exists():
+        return pd.DataFrame()
+    
+    return pd.read_csv(markets_file)
+
+
+def get_market_symbol(exchange_id: int, market_id: int) -> str:
+    """
+    Get the market symbol (e.g., 'ADA-TL') from exchange_id and market_id.
+    
+    Returns the symbol if found, otherwise returns a fallback string.
+    """
+    markets_df = load_markets_map()
+    
+    if markets_df.empty:
+        return f"exchange-{exchange_id}_market-{market_id}"
+    
+    # Check Paribu columns
+    match = markets_df[
+        (markets_df['paribu_exchange_id'] == exchange_id) & 
+        (markets_df['paribu_market_id'] == market_id)
+    ]
+    
+    if not match.empty:
+        return f"{match.iloc[0]['base_currency']}-TL"
+    
+    # Check BTCTurk columns
+    match = markets_df[
+        (markets_df['btcturk_exchange_id'] == exchange_id) & 
+        (markets_df['btcturk_market_id'] == market_id)
+    ]
+    
+    if not match.empty:
+        return f"{match.iloc[0]['base_currency']}-TL"
+    
+    # Fallback
+    return f"exchange-{exchange_id}_market-{market_id}"
+
 
 # =============================================================================
 # Data Loading & Cleaning (reused from analyze_oms.py)
@@ -204,8 +259,8 @@ def split_and_save_by_side(chains: pd.DataFrame, output_dir: Path, charts_dir: P
         # Add empty_gap calculation
         side_chains = add_empty_gap(side_chains)
         
-        # Output filename
-        output_file = output_dir / f"{date}_exchange-{exchange_id}_market-{market_id}_chains_{label}.csv"
+        # Output filename (simplified - directory already contains date/market info)
+        output_file = output_dir / f"chains_{label}.csv"
         
         # Save to CSV
         side_chains.to_csv(output_file, index=False)
@@ -220,7 +275,7 @@ def split_and_save_by_side(chains: pd.DataFrame, output_dir: Path, charts_dir: P
             print(f"  Empty gap (seconds): mean={valid_gaps.mean():.3f}, median={valid_gaps.median():.3f}, min={valid_gaps.min():.6f}, max={valid_gaps.max():.3f}")
         
         # Generate histograms
-        generate_histograms_for_side(side_chains, charts_dir, date, exchange_id, market_id, label)
+        generate_histograms_for_side(side_chains, charts_dir, label)
         
         results[label] = len(side_chains)
     
@@ -286,32 +341,30 @@ def generate_histogram(data: pd.Series, column_name: str, output_path: Path,
 
 
 def generate_histograms_for_side(side_chains: pd.DataFrame, charts_dir: Path,
-                                  date: str, exchange_id: int, market_id: int,
                                   label: str) -> None:
     """
     Generate duration and empty_gap histograms for a side-filtered DataFrame.
     """
-    base_name = f"{date}_exchange-{exchange_id}_market-{market_id}_chains_{label}"
     side_title = "Buy" if label == "buy" else "Sell"
     
-    # Duration histogram
-    duration_path = charts_dir / f"{base_name}_duration_hist.png"
+    # Duration histogram (simplified filename - directory contains context)
+    duration_path = charts_dir / f"chains_{label}_duration_hist.png"
     generate_histogram(
         side_chains['duration'],
         'duration',
         duration_path,
-        f"{side_title} Order Chain Duration\n{date} | Exchange {exchange_id} | Market {market_id}",
+        f"{side_title} Order Chain Duration",
         "Duration (seconds)"
     )
     
     # Empty gap histogram (exclude first row which is -1)
     valid_gaps = side_chains[side_chains['empty_gap'] >= 0]['empty_gap']
-    empty_gap_path = charts_dir / f"{base_name}_empty_gap_hist.png"
+    empty_gap_path = charts_dir / f"chains_{label}_empty_gap_hist.png"
     generate_histogram(
         valid_gaps,
         'empty_gap',
         empty_gap_path,
-        f"{side_title} Order Chain Empty Gap\n{date} | Exchange {exchange_id} | Market {market_id}",
+        f"{side_title} Order Chain Empty Gap",
         "Empty Gap (seconds)"
     )
 
@@ -350,11 +403,12 @@ Examples:
         print(f"Error: Parquet file not found: {parquet_path}")
         sys.exit(1)
     
-    # Ensure output directories exist
-    output_dir = Path.cwd() / "results"
-    output_dir.mkdir(exist_ok=True)
-    charts_dir = output_dir / "charts"
-    charts_dir.mkdir(exist_ok=True)
+    # Look up market symbol from exchange_id and market_id
+    market_symbol = get_market_symbol(args.exchange_id, args.market_id)
+    
+    # Get output directories using new folder structure
+    output_dir = get_results_dir(args.date, market_symbol)
+    charts_dir = get_charts_dir(args.date, market_symbol)
     
     print("=" * 60)
     print("Extract Order Chains")
@@ -362,6 +416,8 @@ Examples:
     print(f"Date: {args.date}")
     print(f"Exchange ID: {args.exchange_id}")
     print(f"Market ID: {args.market_id}")
+    print(f"Market Symbol: {market_symbol}")
+    print(f"Output Directory: {output_dir}")
     print("=" * 60)
     
     # Load parquet file

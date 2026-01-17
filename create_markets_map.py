@@ -6,6 +6,8 @@ Create a mapping between BTCTURK and PARIBU market IDs based on shared base curr
 import csv
 from collections import defaultdict
 
+from results_path import get_shared_dir
+
 
 def extract_base_currency(symbol: str) -> str:
     """Extract the base currency from a symbol like 'SPOT.BTC.TRY' -> 'BTC'"""
@@ -43,8 +45,9 @@ def main():
     # Find common base currencies and create mapping
     common_bases = set(btcturk_markets.keys()) & set(paribu_markets.keys())
     
-    # Write output CSV
-    output_path = 'results/markets_map.csv'
+    # Write output CSV to shared directory
+    shared_dir = get_shared_dir()
+    output_path = shared_dir / 'markets_map.csv'
     with open(output_path, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['base_currency', 'btcturk_exchange_id', 'btcturk_market_id', 

@@ -30,6 +30,8 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
+from results_path import get_results_dir, get_charts_dir
+
 
 def load_orderbook(file_path: Path) -> pd.DataFrame:
     """Load consolidated orderbook data from CSV file."""
@@ -71,16 +73,12 @@ def load_trades(file_path: Path, start_dt: datetime, end_dt: datetime) -> pd.Dat
     return df[mask].copy()
 
 
-def load_highlight_quantities_from_chains(results_dir: Path, date: str,
-                                          exchange_id: int, market_id: int) -> set:
+def load_highlight_quantities_from_chains(results_dir: Path) -> set:
     """
     Load unique initial_qty values from buy and sell chain CSV files.
     
     Args:
         results_dir: Path to results directory containing chain files
-        date: Date string in YYYY-MM-DD format
-        exchange_id: Exchange ID used in chain filename
-        market_id: Market ID used in chain filename
     
     Returns:
         Set of unique initial_qty values found across both chain files
@@ -88,7 +86,8 @@ def load_highlight_quantities_from_chains(results_dir: Path, date: str,
     quantities = set()
     
     for side in ['buy', 'sell']:
-        chain_file = results_dir / f"{date}_exchange-{exchange_id}_market-{market_id}_chains_{side}.csv"
+        # Try new filename first
+        chain_file = results_dir / f"chains_{side}.csv"
         if chain_file.exists():
             df = pd.read_csv(chain_file)
             if 'initial_qty' in df.columns:
@@ -419,15 +418,26 @@ Examples:
         print("Error: End time must be after start time.")
         sys.exit(1)
     
-    # Construct file paths
-    results_dir = Path.cwd() / "results"
-    charts_dir = results_dir / "charts"
-    charts_dir.mkdir(parents=True, exist_ok=True)
+    # Construct the market symbol
+    market_symbol = f"{args.product}-TL"
     
-    # Input file: Public_YYYY-MM-DD_PRODUCT-TL_orderbook_consolidated.csv
-    input_file = results_dir / f"Public_{args.date}_{args.product}-TL_orderbook_consolidated.csv"
-    # Trades file: Public_YYYY-MM-DD_PRODUCT-TL_trades.csv
-    trades_file = results_dir / f"Public_{args.date}_{args.product}-TL_trades.csv"
+    # Get directories using new folder structure
+    results_dir = get_results_dir(args.date, market_symbol)
+    charts_dir = get_charts_dir(args.date, market_symbol)
+    
+    # Input file: orderbook_consolidated.csv (new) or Public_YYYY-MM-DD_PRODUCT-TL_orderbook_consolidated.csv (old)
+    input_file = results_dir / "orderbook_consolidated.csv"
+    if not input_file.exists():
+        # Fall back to old location
+        old_results_dir = Path.cwd() / "results"
+        input_file = old_results_dir / f"Public_{args.date}_{args.product}-TL_orderbook_consolidated.csv"
+    
+    # Trades file: trades.csv (new) or Public_YYYY-MM-DD_PRODUCT-TL_trades.csv (old)
+    trades_file = results_dir / "trades.csv"
+    if not trades_file.exists():
+        # Fall back to old location
+        old_results_dir = Path.cwd() / "results"
+        trades_file = old_results_dir / f"Public_{args.date}_{args.product}-TL_trades.csv"
     
     # Determine highlight quantities
     # Priority: 1) --no-highlight disables, 2) --highlight-qty explicit values, 3) auto-detect from chains
@@ -441,11 +451,9 @@ Examples:
         highlight_qtys = args.highlight_qty
         highlight_mode = "explicit"
     elif args.exchange_id is not None and args.market_id is not None:
-        # Auto-detect from chain files
+        # Auto-detect from chain files (still supported for backward compatibility)
         print(f"\nAuto-detecting highlight quantities from chain files...")
-        highlight_set = load_highlight_quantities_from_chains(
-            results_dir, args.date, args.exchange_id, args.market_id
-        )
+        highlight_set = load_highlight_quantities_from_chains(results_dir)
         if highlight_set:
             highlight_qtys = list(highlight_set)
             highlight_mode = "auto"
@@ -525,10 +533,10 @@ Examples:
         else:
             print(f"  No trades found in time window")
     
-    # Generate output filename
+    # Generate output filename (simplified - directory already contains date/market info)
     start_safe = args.start.replace(':', '-')
     end_safe = args.end.replace(':', '-')
-    output_file = charts_dir / f"{args.date}_{args.product}_orderbook_heatmap_{start_safe}_{end_safe}.png"
+    output_file = charts_dir / f"orderbook_heatmap_{start_safe}_{end_safe}.png"
     
     # Plot
     print(f"\nGenerating dual-panel visualization...")

@@ -20,10 +20,7 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 
-
-# Results directory
-RESULTS_PATH = Path("/Users/dasamuel/Projects/Sandbox/results")
-CHARTS_PATH = RESULTS_PATH / "charts"
+from results_path import get_results_dir, get_charts_dir
 
 
 def parse_args():
@@ -52,7 +49,15 @@ Examples:
 
 def load_trade_data(date: str, product: str) -> pd.DataFrame:
     """Load trade data from CSV file."""
-    csv_path = RESULTS_PATH / f"Public_{date}_{product}_trades.csv"
+    results_dir = get_results_dir(date, product)
+    
+    # Try new filename first
+    csv_path = results_dir / "trades.csv"
+    
+    # Fall back to old location
+    if not csv_path.exists():
+        old_results_dir = Path(__file__).parent / "results"
+        csv_path = old_results_dir / f"Public_{date}_{product}_trades.csv"
     
     if not csv_path.exists():
         raise FileNotFoundError(f"Trade data file not found: {csv_path}")
@@ -311,14 +316,15 @@ def main():
         print(f"Error: Invalid date format '{args.date}'. Use YYYY-MM-DD.")
         return 1
     
-    # Ensure charts directory exists
-    CHARTS_PATH.mkdir(parents=True, exist_ok=True)
+    # Get charts directory using new folder structure
+    charts_dir = get_charts_dir(args.date, args.product)
     
     print("=" * 60)
     print("Timestamp Comparison Visualization")
     print("=" * 60)
     print(f"Date: {args.date}")
     print(f"Product: {args.product}")
+    print(f"Output Directory: {charts_dir}")
     print("=" * 60)
     
     # Load data
@@ -334,19 +340,19 @@ def main():
     # Print statistics
     print_statistics(df, args.date, args.product)
     
-    # Generate plots
+    # Generate plots (simplified filenames - directory already contains date/market info)
     print("\nGenerating visualizations...")
     
     # Scatter plot
-    scatter_path = CHARTS_PATH / f"{args.date}_{args.product}_timestamp_scatter.png"
+    scatter_path = charts_dir / "timestamp_scatter.png"
     plot_scatter(df, args.date, args.product, scatter_path)
     
     # Histogram
-    hist_path = CHARTS_PATH / f"{args.date}_{args.product}_timestamp_delay_hist.png"
+    hist_path = charts_dir / "timestamp_delay_hist.png"
     plot_delay_histogram(df, args.date, args.product, hist_path)
     
     # Time series
-    timeseries_path = CHARTS_PATH / f"{args.date}_{args.product}_timestamp_delay_timeseries.png"
+    timeseries_path = charts_dir / "timestamp_delay_timeseries.png"
     plot_delay_timeseries(df, args.date, args.product, timeseries_path)
     
     print("\n" + "=" * 60)
