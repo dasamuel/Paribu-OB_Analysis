@@ -21,6 +21,7 @@ A comprehensive toolkit for analyzing cryptocurrency order book data, order flow
   - [create_markets_map.py](#create_markets_mappy---market-mapping-generator)
   - [view_parq.py](#view_parqpy---parquet-file-viewer)
   - [results_path.py](#results_pathpy---results-directory-utility)
+  - [config.py](#configpy---configuration-loader)
 - [Input Data Format](#input-data-format)
 - [Output Files](#output-files)
 - [Market Reference](#market-reference)
@@ -32,22 +33,26 @@ A comprehensive toolkit for analyzing cryptocurrency order book data, order flow
 ## Quick Start
 
 ```bash
-# 1. Create cross-exchange market mapping (one-time setup)
+# 1. Configure data paths (one-time setup)
+cp config.yaml.example config.yaml
+# Edit config.yaml with your data directory paths
+
+# 2. Create cross-exchange market mapping (one-time setup)
 python create_markets_map.py
 
-# 2. Extract public market data (orderbook and trades)
+# 3. Extract public market data (orderbook and trades)
 python extract_public_data.py --date 2026-01-16 --product DOGE-TL
 
-# 3. Extract order chains for a specific exchange/market
+# 4. Extract order chains for a specific exchange/market
 python extract_chains.py 2026-01-16 129 270
 
-# 4. Calculate Level 1 time and trade attribution
+# 5. Calculate Level 1 time and trade attribution
 python calculate_level1_time.py 2026-01-16 DOGE-TL
 
-# 5. Visualize orderbook as heatmap with price chart
+# 6. Visualize orderbook as heatmap with price chart
 python visualize_orderbook.py 2026-01-16 DOGE 00:00:00 00:05:00
 
-# 6. Analyze OMS order logs
+# 7. Analyze OMS order logs
 python analyze_oms.py /path/to/oms_order_log.parq
 ```
 
@@ -60,11 +65,12 @@ python analyze_oms.py /path/to/oms_order_log.parq
 - pyarrow (for parquet support)
 - numpy
 - matplotlib (for chart generation)
+- pyyaml (for configuration)
 
 Install dependencies:
 
 ```bash
-pip install pandas pyarrow numpy matplotlib
+pip install pandas pyarrow numpy matplotlib pyyaml
 ```
 
 ---
@@ -73,6 +79,9 @@ pip install pandas pyarrow numpy matplotlib
 
 ```
 .
+├── config.yaml             # Local configuration (data paths) - create from example
+├── config.yaml.example     # Configuration template
+├── config.py               # Configuration loader module
 ├── analyze_oms.py          # OMS order log analysis tool
 ├── extract_chains.py       # Order chain extraction with histograms
 ├── extract_public_data.py  # Public market data extraction with deduplication
@@ -89,6 +98,41 @@ pip install pandas pyarrow numpy matplotlib
 ├── README.md               # This documentation
 └── results/                # Output directory (auto-created)
 ```
+
+---
+
+## Configuration
+
+Before running the analysis tools, you need to configure the paths to your data directories.
+
+### Setup
+
+```bash
+# Copy the example configuration
+cp config.yaml.example config.yaml
+
+# Edit config.yaml with your paths
+```
+
+### Configuration File (`config.yaml`)
+
+```yaml
+# Data source paths - edit these for your environment
+paths:
+  # Directory containing OMS log parquet files
+  # Files are named: YYYY-MM-DD__oms_order_log.parq
+  oms_logs: /path/to/your/oms_logs
+
+  # Directory containing Paribu market data
+  # Structure: {product}/orderbook/{date}/{hour}/*.parquet
+  paribu_market_data: /path/to/your/paribu/market-data
+```
+
+### Notes
+
+- `config.yaml` is gitignored (contains machine-specific paths)
+- `config.yaml.example` is tracked and serves as a template
+- If `config.yaml` is missing, scripts will exit with a helpful error message
 
 ---
 
@@ -625,6 +669,36 @@ get_shared_dir()  # -> results/shared/
 
 ---
 
+### `config.py` - Configuration Loader
+
+A utility module that loads configuration from `config.yaml` and provides accessor functions for data source paths.
+
+#### Functions
+
+```python
+from config import get_oms_logs_path, get_paribu_market_data_path
+
+# Get path to OMS logs directory
+oms_path = get_oms_logs_path()  # -> Path("/path/to/oms_logs")
+
+# Get path to Paribu market data directory
+paribu_path = get_paribu_market_data_path()  # -> Path("/path/to/market-data")
+```
+
+#### Error Handling
+
+If `config.yaml` is missing, the module will exit with a helpful message:
+
+```
+Error: Configuration file not found: /path/to/config.yaml
+
+Please create config.yaml with your data paths.
+You can copy config.yaml.example as a starting point:
+  cp /path/to/config.yaml.example /path/to/config.yaml
+```
+
+---
+
 ## Input Data Format
 
 ### OMS Order Log Format
@@ -647,12 +721,9 @@ The analysis tools accept OMS order log files in CSV or Parquet format with the 
 
 ### Public Market Data Source
 
-Public market data is located at:
-```
-/Users/dasamuel/Data/MarketData/ParibuData/market-data/
-```
+Public market data location is configured in `config.yaml` under `paths.paribu_market_data`.
 
-Organized by product, data type, date, and hour:
+The data is organized by product, data type, date, and hour:
 ```
 {PRODUCT}/
   orderbook/

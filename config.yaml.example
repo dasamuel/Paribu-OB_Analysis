@@ -1,0 +1,12 @@
+# Data source paths - edit these for your environment
+# Copy this file to config.yaml and update the paths:
+#   cp config.yaml.example config.yaml
+
+paths:
+  # Directory containing OMS log parquet files
+  # Files are named: YYYY-MM-DD__oms_order_log.parq
+  oms_logs: /path/to/your/oms_logs
+
+  # Directory containing Paribu market data
+  # Structure: {product}/orderbook/{date}/{hour}/*.parquet
+  paribu_market_data: /path/to/your/paribu/market-data

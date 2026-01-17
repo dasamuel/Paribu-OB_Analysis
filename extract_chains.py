@@ -21,6 +21,7 @@ from pathlib import Path
 from datetime import datetime
 
 from results_path import get_results_dir, get_charts_dir, get_shared_dir
+from config import get_oms_logs_path
 
 
 # =============================================================================
@@ -397,7 +398,8 @@ Examples:
         sys.exit(1)
     
     # Construct parquet file path
-    parquet_path = Path(f"/Users/dasamuel/Data/TradingData/data/raw/oms_logs/{args.date}__oms_order_log.parq")
+    oms_logs_dir = get_oms_logs_path()
+    parquet_path = oms_logs_dir / f"{args.date}__oms_order_log.parq"
     
     if not parquet_path.exists():
         print(f"Error: Parquet file not found: {parquet_path}")

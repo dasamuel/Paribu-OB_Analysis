@@ -11,10 +11,7 @@ from pathlib import Path
 from datetime import datetime
 
 from results_path import get_results_dir
-
-
-# Base path for public market data
-DATA_BASE_PATH = Path("/Users/dasamuel/Data/MarketData/ParibuData/market-data")
+from config import get_paribu_market_data_path
 
 
 def parse_args():
@@ -53,26 +50,27 @@ def validate_date(date_str: str) -> str:
 
 def get_product_path(product: str) -> Path:
     """Get the path to the product folder, handling underscore vs hyphen variants."""
-    product_path = DATA_BASE_PATH / product
+    data_base_path = get_paribu_market_data_path()
+    product_path = data_base_path / product
     if product_path.exists():
         return product_path
     
     # Try alternative naming (underscore vs hyphen)
     alt_product = product.replace("-", "_")
-    alt_path = DATA_BASE_PATH / alt_product
+    alt_path = data_base_path / alt_product
     if alt_path.exists():
         return alt_path
     
     # Try the reverse
     alt_product = product.replace("_", "-")
-    alt_path = DATA_BASE_PATH / alt_product
+    alt_path = data_base_path / alt_product
     if alt_path.exists():
         return alt_path
     
     print(f"Error: Product folder not found for '{product}'")
     print(f"Checked: {product_path}")
     print(f"Available products:")
-    for p in sorted(DATA_BASE_PATH.iterdir()):
+    for p in sorted(data_base_path.iterdir()):
         if p.is_dir():
             print(f"  - {p.name}")
     sys.exit(1)
